@@ -10,7 +10,10 @@ module.exports =  {
                 use: {
                     loader: 'babel-loader',
                     options: {
-                        presets: ['@babel/preset-react']
+                        presets: [
+                            '@babel/preset-flow', // 调试React专用
+                            '@babel/preset-react'
+                        ]
                     }
                 }
             },
@@ -19,6 +22,10 @@ module.exports =  {
                 use: ['style-loader', 'css-loader'],
             }
         ]
+    },
+    resolve: {
+        modules: [path.resolve(__dirname, 'libs/react', 'packages')]
+            
     },
     plugins: [
        new HTMLWebpackPlugin({
