@@ -39,7 +39,7 @@ Sachedule 就是用来调度任务优先级的模块
 ReactFiberLane定义这些任务走那个通道
 
 
-### Scheduler调度器
+## Scheduler调度器
 调度任务的优先级，高优先任务先进入Reconciler
 
 ### 了解React里的优先级 (和时间对应的)
@@ -123,7 +123,7 @@ function FiberNode(tag: WorkTag, pendingProps: mixed, key: null | string, mode: 
   this.lanes = NoLanes;
   this.childLanes = NoLanes;
 
-  this.alternate = null;
+  this.alternate = null; // 指向worInProgress Fiber, WorkInProgress 是上一次构建的Fiber镜像
 
   if (enableProfilerTimer) {
     // Note: The following is done to avoid a v8 performance cliff.
@@ -177,3 +177,133 @@ function FiberNode(tag: WorkTag, pendingProps: mixed, key: null | string, mode: 
 3. 对比startTime和currentTime,将任务分为及时任务和延时任务
 4. 及时任务当即执行
 5. 延时任务需要等到currentTime >= expirationTime 的时候才会执行
+6. 及时任务执行完成后，也会去判断是否有延时任务到了该执行之时，如果是，就执行延时任务
+7. 每一批任务的执行在不同的宏任务中，不阻塞页面的用户交互
+
+
+
+## Reconciler （协调器）
+主要作用是负责找出变化的组件， React16以上，为了方便打断，数据结构改成链表形式
+DOM-diff -> 生成dom元素打标记 -> 等下一个commit阶段渲染
+domdiff和生成都都可以打断， 但是commit阶段不允许被打断
+
+### 大致的找出找出变化组件的逻辑
+react发生一次更新的时候，比如ReactDOM.render/setState,都会从Fiber Root开始从上往下遍历，然后逐一找到变化的节点。构建完成会形成一颗Fiber Tree. 在React内部同时存在两颗Fiber树
+
+## commit阶段（负责将变化的组件渲染到页面上）
+### 3个阶段：
+#### commitBeforeMutationEffects (DOM操作前)
+1、 处理DOM节点 渲染/删除后的autoFocus、blur逻辑
+2、 调用getSnapshotBeforeUpdate生命周期钩子
+3、 调度useEffect
+
+
+#### 双缓存结构
+1. 在 React中最多会同时存在两颗Fiber树
+2. 当前屏幕上显示内容对应的Fiber树， 称为current Fiber树， current fiber树在FiberNode上称current fiber.
+3. 正在内存中构建的Fiber称为workInProgress Fiber树, workInProgress Fiber树中的Fiber节点被称为workInProgress fiber. 他们通过alternate属性连接
+4. 如果之前没有FiberTree就逐级创建FiberTree;如果存在FiberTree会构建一个workInProgress Tree,这个tree的Fiber节点可以服用currenttree 上没有变化的节点
+
+##### 为什么是双向缓存结构
+1. 可以很快的找到之前对应的fiber
+2. 在某些情况下可以直接复用fiber
+3. 更新完称后current直接指向workInProgress root, 完成 Fibertree的更新
+
+
+#### 构建Fiber Tree
+Reconciler的代码大致从renderRootSync函数开始， 从高优先级的FiberRoot开始递归 WorkRootSync
+
+
+workLoopSync:  while true循环如果有workInPress就执行 completeUnitOfwork
+completeUnitOfWork: 遍历所有子节点创建FiberNode, 如过字节点不存在则执行PerformUnitOfwork
+performUnitOfWork: 判断是否sibling节点，如果没有则返回上层在检查是否有兄弟节点知道所有树都创建完成
+
+1. beginWork和completeWork负责把节点创建完毕
+
+beginWork 会深度遍历子节点
+completeWork 负责兄弟节点，没有则返回到父节点。
+
+#### beginWork
+1. 判断fiber节点是否可以复用
+2. 根据不同的Tag，生成不同Fiber节点（调用reconcilerChild);
+  - Mount阶段：创建 Fiber节点
+  - Update阶段和现在Fiber节点做对比， 生成新的Fiber节点
+    - 单个节点Diff
+    - 多个节点Diff
+3. 给存在的Fiber节点打上标记newFiber.flags = Placement| Updatre |deletion..
+4. 创建Fiber节点赋给WorkInProgress.child，返回WorkInProgress.child，继续下一次循环
+
+说明：
+当是function组件时 调用runWithHooks方法，注入hooks上下文执行function函数体
+
+##### diff算法
+diff的瓶颈预设几个规则 (ReactChildFiber.new.js)
+1. 只对平级，进行比较
+2. 节点变化，直接删除，然后重建
+3. 存在key值，对比key值一样的节点
+###### 单个节点的diff
+1. 判断存在对应的接待你，key值是否相同，节点类型一致，可以复用
+2. 存在对应节点，key值是否项目，节点类型不一致，标记删除
+3. 存在对应节点，key值不同，标记删除
+4. 不存在对应节点创建新节点
+###### 多个节点diff
+1. 对比新旧children相同的index的对象key是否相同，如果是，返回该对象，如果不是返回null
+2. key值不等， 不用对比下去了，节点不能复用，跳出
+3. 判断是否存在移动，存在则返回新位置
+4. 但可以存在新的数组小于老数组情况，即老十足后面有剩余的，所有要删除
+5. 新数组存在新增的接待你，创建新阶段
+5. 创建一个existingChild代表所有剩余没有匹配掉的节点，然后新的数组根据可以从这个map里边查找，如果有则复用，没有则新建
+
+
+#### completeUnitOfWork
+1. 向上递归completedWork
+2. 创建DOM节点，更新DOM节点；DOM节点赋值给stateNode属性
+3. 把子节点的sideEffect统统附加到父节点的sideEffect链之上。在commit节点使用
+4. 存在兄弟节点，将workInProgrees指向兄弟节点，执行兄弟节点的beginWork过程
+5. 不存在兄弟节点返回父节点。继续执行父节点completeWork
+
+
+### commit阶段 （负责将变化的组件渲染到页面上
+分3个阶段
+#### commmitBeforeMutationEffects (DOM操作前) 
+1. 处理DOM节点，渲染删除后的auutoFcous,blur逻辑
+2. 调用getSnapshotBeforeUpdate声明周期钩子
+3. 调度useEffect
+
+#### commitMutationEffects (DOM操作时)
+
+#### commitLayoutEffects (DOM操作后) 
+1. layout阶段也是遍历effectList,调用声明周期，执行useEffect
+2. 赋值ref
+3. 处理回调
+
+
+1. React.render流程
+是走的unBatchUpdate，没有schedule调度， 直接到reconciler阶段
+
+
+unBatchUpdate //不批处理
+batchUpdate 批处理
+
+2. this.setState流程
+
+### 性能优化
+类组件 
+1. 通过showComponentUpdate
+2. purComponent 组件， 这个其实直接shouldComponentUpdate对prop和state做一个浅比较
+
+
+
+函数组件
+1. useCallback 来控制传给自组件的函数
+2. React.memo 来实现类似于shouldComponentUpdate 
+```
+React.memo(() => {
+  return (
+    <div> </div>
+  )
+}, () => {}); // 可以省略第二个参数默认做一个浅比较， 如果写第二个参数自己控制组件是否渲染， 返回true代码更新组件
+3. useMemo ：对于一些的状态可以优化
+```
+
+
